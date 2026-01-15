@@ -1,69 +1,67 @@
 import socket
+from protocol_fsm import ProtocolError, ProtocolFSM
 
-HOST = "127.0.0.1"
-PORT = 5000
+import sys
 
-"""
-socket.socket() is the constructor for the socket class, located inside the socket module.
-In Python, it is very common for a module to have the exact same name as the primary class it contains.
-When we type import socket, we are importing the module (a file named socket.py). Inside that file, there is a class also named socket.
-"""
+if len(sys.argv) != 3:
+    print("Usage : python server.py <IP> <PORT>")
+    sys.exit(1)
+
+HOST = sys.argv[1]
+PORT = int(sys.argv[2])
+
+def parse_message(raw : str) -> dict:
+
+    parts = raw.split("|", 2)
+    if(len(parts) != 3):
+        raise ValueError("Incorrect Message Format")
+    
+    opcode, round_str, payload = raw.split("|", 2)
+
+    return {
+        "opcode" : opcode,
+        "round" : int(round_str),
+        "payload" : payload
+    }
+
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.bind((HOST,PORT))
+server.bind((HOST, PORT))
 server.listen(1)
 
-print("Server sunn rha hai ... apne pyaar ka intezaar kar rha hai")
+print("Server listening...")
 
 conn, addr = server.accept()
 print("Connected to", addr)
 
-"""
-Even though your main server socket (the one we named server) is listening, it does not actually talk to the client.
-Instead, .accept() spawns a brand new socket specifically for that one client.
-The Original Socket (server): Stays at the "front door," continuing to listen for new people.
-The New Socket (conn): Goes into a "private room" to handle the actual conversation (sending and receiving data) with that specific client.
-"""
+fsm = ProtocolFSM()
+
+def terminate(reason):
+    print("Session terminated:", reason)
+    conn.sendall(f"ERROR|{reason}".encode())
+    conn.close()
+    exit()
 
 while True:
-    data = conn.recv(1024) # we specify the amount of data to recieve
-    # like c++, .recv() is also blocking, it remains in this line until client sends some data
+    data = conn.recv(1024)
     if not data:
-        print("Client disconnected")
         break
 
-    msg = data.decode()
-    print("Raw msg:", msg)
+    raw_msg = data.decode()
+    print("Received:", raw_msg)
 
     try:
-        opcode, round_no. payload = msg.split("|",2)
-    except:
-        conn.sendall(b"ERROR|Invalid Format")
-        continue
+        message = parse_message(raw_msg) # this returns a dict
+        response = fsm.process(message) # this changes the state of the FSM and returns a response
+        conn.sendall(response.encode()) # response is sent to the client
 
-    if opcode == "HELLO":
-        response = f"OK|{round_no}|Hello Acknowledged"
-    elif opcode == "DATA":
-        response = f"OK|{round_no}|Data received : {payload}"
-    elif opcode == "EXIT":
-        response = f"OK|{round_no}|Goodbye"
-        conn.sendall(response.encode())
+        if response == "SESSION_TERMINATED":
+            terminate("Session Terminated Cleanly")
+
+    except (ValueError, ProtocolError) as e:
+        error_msg = f"ERROR:{str(e)}"
+        terminate(error_msg)
         break
-    else:
-        response = f"ERROR|{round_no}|Unknown opcode"
-
-    conn.sendall(response.encode())
 
 conn.close()
 server.close()
-
-"""
-1. Why encode and decode ?
-.encode(): Converts a String (human-readable) into Bytes (machine-readable).  
-.decode(): Converts Bytes back into a String.  
-The Rule: You Encode before you send(), and you Decode after you recv().
-
-2. send vs sendall()
-In socket programming, the primary difference is that send() may send only a portion of the data you provide, 
-requiring you to handle subsequent sends, while sendall() guarantees that all data is sent or it raises an exception. 
-"""
