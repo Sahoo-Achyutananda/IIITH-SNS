@@ -33,9 +33,25 @@ while True:
         break
 
     msg = data.decode()
-    print("Client says:", msg)
+    print("Raw msg:", msg)
 
-    response  = "ACK : " + msg
+    try:
+        opcode, round_no. payload = msg.split("|",2)
+    except:
+        conn.sendall(b"ERROR|Invalid Format")
+        continue
+
+    if opcode == "HELLO":
+        response = f"OK|{round_no}|Hello Acknowledged"
+    elif opcode == "DATA":
+        response = f"OK|{round_no}|Data received : {payload}"
+    elif opcode == "EXIT":
+        response = f"OK|{round_no}|Goodbye"
+        conn.sendall(response.encode())
+        break
+    else:
+        response = f"ERROR|{round_no}|Unknown opcode"
+
     conn.sendall(response.encode())
 
 conn.close()
