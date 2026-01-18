@@ -1,7 +1,11 @@
 import socket
-from protocol_fsm import ProtocolError, ProtocolFSM
-
 import sys
+import struct
+from protocol_fsm import ProtocolError, ProtocolFSM
+from crypto_utils import (
+    aes_encrypt, aes_decrypt, compute_hmac, 
+    verify_hmac, evolve_key, pack_header
+)
 
 if len(sys.argv) != 3:
     print("Usage : python server.py <IP> <PORT>")
@@ -10,58 +14,91 @@ if len(sys.argv) != 3:
 HOST = sys.argv[1]
 PORT = int(sys.argv[2])
 
-def parse_message(raw : str) -> dict:
-
-    parts = raw.split("|", 2)
-    if(len(parts) != 3):
-        raise ValueError("Incorrect Message Format")
-    
-    opcode, round_str, payload = raw.split("|", 2)
-
-    return {
-        "opcode" : opcode,
-        "round" : int(round_str),
-        "payload" : payload
-    }
-
+# Master key for each client (must be same as what client is using)
+MASTER_KEYS = {1: b"this_is_16_bytes"} 
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind((HOST, PORT))
-server.listen(1)
-
-print("Server listening...")
-
-conn, addr = server.accept()
-print("Connected to", addr)
-
-fsm = ProtocolFSM()
-
-def terminate(reason):
-    print("Session terminated:", reason)
-    conn.sendall(f"ERROR|{reason}".encode())
-    conn.close()
-    exit()
+server.listen(5)
+print(f"Server listening on {HOST}:{PORT}...")
 
 while True:
-    data = conn.recv(1024)
-    if not data:
-        break
-
-    raw_msg = data.decode()
-    print("Received:", raw_msg)
+    conn, addr = server.accept()
+    print(f"New connection from {addr}")
 
     try:
-        message = parse_message(raw_msg) # this returns a dict
-        response = fsm.process(message) # this changes the state of the FSM and returns a response
-        conn.sendall(response.encode()) # response is sent to the client
+        cid = 1 
+        mk = MASTER_KEYS[cid]
+        
+        # Create first set of encryption and MAC keys using master key
+        c2s_enc = evolve_key(mk, b"C2S-ENC")
+        c2s_mac = evolve_key(mk, b"C2S-MAC")
+        s2c_enc = evolve_key(mk, b"S2C-ENC")
+        s2c_mac = evolve_key(mk, b"S2C-MAC")
 
-        if response == "SESSION_TERMINATED":
-            terminate("Session Terminated Cleanly")
+        # FSM will track protocol state and round numbers
+        fsm = ProtocolFSM(cid) 
 
-    except (ValueError, ProtocolError) as e:
-        error_msg = f"ERROR:{str(e)}"
-        terminate(error_msg)
-        break
+        while True:
+            data = conn.recv(4096)
+            if not data:
+                break
 
-conn.close()
+            # Message format:
+            # [7 bytes header][16 bytes IV][encrypted data][32 bytes HMAC]
+            header_bytes = data[:7]
+            iv = data[7:23]
+            received_mac = data[-32:]
+            ciphertext = data[23:-32]
+
+            # 1. First check if message was changed using HMAC
+            # If HMAC fails, we reject the message without decrypting
+            if not verify_hmac(c2s_mac, data[:-32], received_mac):
+                raise ProtocolError("HMAC Verification Failed!") 
+
+            # 2. Check header info and confirm message order using FSM
+            opcode, rx_cid, rx_round, direction = struct.unpack("!BBIB", header_bytes)
+            fsm.validate_and_update(opcode, rx_round)
+
+            # 3. Now decrypt the message since it is verified
+            plaintext = aes_decrypt(c2s_enc, iv, ciphertext)
+            print(f"Round {rx_round} | From Client {rx_cid}: {plaintext.decode()}")
+
+            # 4. Prepare reply message for client
+            res_opcode = 40 if opcode == 30 else 20
+            res_payload = b"SERVER_ACK: " + plaintext
+            
+            # Create header for server-to-client message
+            res_header = pack_header(res_opcode, cid, rx_round, 1) # 1 means server to client
+            res_iv, res_ciphertext = aes_encrypt(s2c_enc, res_payload)
+            
+            # Combine header + IV + encrypted data
+            res_msg = res_header + res_iv + res_ciphertext
+            res_mac = compute_hmac(s2c_mac, res_msg)
+            
+            # Send full secured message to client
+            conn.sendall(res_msg + res_mac)
+
+            # 5. Update keys so next message uses fresh keys (ratcheting)
+            # Update client-to-server keys based on received ciphertext
+            c2s_enc = evolve_key(c2s_enc, ciphertext)
+            c2s_mac = evolve_key(c2s_mac, b"CONSTANT_NONCE") 
+
+            # Update server-to-client keys based on sent ciphertext
+            s2c_enc = evolve_key(s2c_enc, res_ciphertext)
+            s2c_mac = evolve_key(s2c_mac, b"CONSTANT_NONCE") 
+
+            # Move FSM to next round
+            fsm.increment_round() 
+            
+            # If client sends close opcode, stop this connection
+            if opcode == 60:
+                break
+
+    except (ProtocolError, ValueError) as e:
+        print(f"Protocol/Security Violation: {e}")
+    finally:
+        conn.close()
+
 server.close()
