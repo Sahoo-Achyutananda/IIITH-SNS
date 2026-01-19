@@ -84,15 +84,12 @@ def handle_client(conn, addr):
             # ---- FSM CHECK ----
             fsm.validate_and_update(opcode, rx_round, direction)
 
-
             # ---- DECRYPT ----
             plaintext = aes_decrypt(c2s_enc, iv, ciphertext)
             msg = plaintext.decode()
             print(f"[Client {cid}] Round {rx_round}: {msg}")
 
-            # ======================================================
-            # HANDSHAKE RESPONSE
-            # ======================================================
+            # ================= HANDSHAKE =================
             if opcode == 10:  # CLIENT_HELLO
                 res_header = pack_header(20, cid, rx_round, 1)  # SERVER_CHALLENGE
                 res_iv, res_ciphertext = aes_encrypt(s2c_enc, b"SERVER_CHALLENGE")
@@ -109,9 +106,7 @@ def handle_client(conn, addr):
                 fsm.increment_round()
                 continue
 
-            # ======================================================
-            # AGGREGATION COLLECTION
-            # ======================================================
+            # ================= AGGREGATION =================
             aggregate_ready = False
             agg_result = None
 
@@ -133,9 +128,7 @@ def handle_client(conn, addr):
                         agg_result = sum(round_values[rx_round])
                         aggregate_ready = True
 
-            # ======================================================
-            # SEND AGGREGATED RESULT
-            # ======================================================
+            # ================= SEND AGG RESULT =================
             if aggregate_ready:
                 result_msg = f"AGG_RESULT: {agg_result}".encode()
 
@@ -149,9 +142,7 @@ def handle_client(conn, addr):
                     res_mac = compute_hmac(s2c_mac, res_msg)
                     c.sendall(res_msg + res_mac)
 
-            # ======================================================
-            # KEY EVOLUTION
-            # ======================================================
+            # ================= KEY EVOLUTION =================
             c2s_enc = evolve_key(c2s_enc, ciphertext)
             c2s_mac = evolve_key(c2s_mac, b"CONSTANT_NONCE")
 
@@ -169,6 +160,16 @@ def handle_client(conn, addr):
 
     except (ProtocolError, ValueError) as e:
         print(f"[{addr}] Protocol/Security Violation: {e}")
+
+        # -------- SEND KEY DESYNC ERROR (Opcode 50) --------
+        try:
+            err_header = pack_header(50, cid, fsm.expected_round, 1)
+            err_iv, err_cipher = aes_encrypt(s2c_enc, b"KEY_DESYNC")
+            err_msg = err_header + err_iv + err_cipher
+            err_mac = compute_hmac(s2c_mac, err_msg)
+            conn.sendall(err_msg + err_mac)
+        except:
+            pass
 
     finally:
         conn.close()

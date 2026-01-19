@@ -15,12 +15,10 @@ HOST = sys.argv[1]
 PORT = int(sys.argv[2])
 CLIENT_ID = int(sys.argv[3])
 
-# Make sure master key is exactly 16 bytes for AES-128
+# Ensure master key is exactly 16 bytes
 MASTER_KEY = sys.argv[4].encode().ljust(16, b'\0')[:16]
 
 # ---------------- KEY INITIALIZATION ----------------
-# Create first encryption and MAC keys from master key
-
 c2s_enc = evolve_key(MASTER_KEY, b"C2S-ENC")
 c2s_mac = evolve_key(MASTER_KEY, b"C2S-MAC")
 s2c_enc = evolve_key(MASTER_KEY, b"S2C-ENC")
@@ -53,7 +51,7 @@ try:
                 payload = input(">> Enter numeric data: ").encode()
 
         # Create protocol header
-        header = pack_header(opcode, CLIENT_ID, round_no, 0)  # 0 = client to server
+        header = pack_header(opcode, CLIENT_ID, round_no, 0)
 
         # Encrypt payload
         iv, ciphertext = aes_encrypt(c2s_enc, payload)
@@ -61,10 +59,9 @@ try:
         # Combine header + IV + ciphertext
         msg_out = header + iv + ciphertext
 
-        # Create HMAC for integrity
+        # Create HMAC
         mac_out = compute_hmac(c2s_mac, msg_out)
 
-        # Send full secured message
         client.sendall(msg_out + mac_out)
 
         # ---------------- RECEIVE SERVER RESPONSE ----------------
@@ -77,9 +74,8 @@ try:
         rx_mac = data[-32:]
         rx_ciphertext = data[23:-32]
 
-        # Verify HMAC before decrypting
         if not verify_hmac(s2c_mac, data[:-32], rx_mac):
-            print("!!! SECURITY ALERT: HMAC Mismatch. Terminating.")
+            print("SECURITY ALERT: HMAC mismatch. Terminating.")
             break
 
         try:
@@ -87,20 +83,28 @@ try:
             print(f"Server Response: {decrypted_payload.decode()}")
 
             rx_opcode = rx_header[0]
+            rx_direction = rx_header[6]
+
+            if rx_direction != 1:
+                print("Protocol error: invalid direction from server.")
+                break
+
+            if rx_opcode == 50:
+                print("Server reported KEY DESYNC. Closing session.")
+                break
+
             if rx_opcode == 60:
+                print("Server terminated session.")
                 break
 
         except Exception as e:
             print(f"Decryption Error: {e}")
             break
 
-        # ---------------- KEY EVOLUTION (RATCHETING) ----------------
-
-        # Update client-to-server keys using sent ciphertext
+        # ---------------- KEY EVOLUTION ----------------
         c2s_enc = evolve_key(c2s_enc, ciphertext)
         c2s_mac = evolve_key(c2s_mac, b"CONSTANT_NONCE")
 
-        # Update server-to-client keys using received ciphertext
         s2c_enc = evolve_key(s2c_enc, rx_ciphertext)
         s2c_mac = evolve_key(s2c_mac, b"CONSTANT_NONCE")
 
