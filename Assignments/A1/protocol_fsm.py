@@ -1,3 +1,5 @@
+from crypto_utils import evolve_key
+
 class ProtocolError(Exception):
     pass
 
@@ -10,39 +12,65 @@ class ProtocolFSM:
     TERMINATED -> none
     """
 
-    def __init__(self):
-        self.phase = "INIT"
-        self.expected_round = 0
+    # defining phases -
+    INIT = "INIT"
+    ACTIVE = "ACTIVE"
+    TERMINATED = "TERMINATED"
+
+    # defining opcodes
+    CLIENT_HELLO = 10
+    CLIENT_DATA = 30
+    TERMINATE = 60
+
+    def __init__(self, client_id : int, master_key : bytes):
+        self.client_id = client_id
+        self.phase = self.INIT
+        self.round = 0
+
+        # initializing initial keys -
+        self.c2s_enc = evolve_key(master_key, b"Apple")
+        self.c2s_mac = evolve_key(master_key, b"Banana")
+        self.s2c_enc = evolve_key(master_key, b"Carrot")
+        self.s2c_mac = evolve_key(master_key, b"Dragonfruit")
     
-    def process(self, message : dict) -> str:
-        opcode = message["opcode"]
-        round_no = message["round"]
-        payload = message["payload"]
+    def validate_message(self, opcode : int, msg_round : int, direction : int):
+        if msg_round != self.round:
+            raise ProtocolError(f"Round Mismatch, expected - {self.round}, got - {msg_round}")
 
+        if direction not in (0,1):
+            raise ProtocolError("Invalid direction field")
         
-        if round_no != self.expected_round:
-            raise ProtocolError(f"Round Mismatch, expected - {self.expected_round}, got - {round_no}")
-        
-        if self.phase == "INIT":
-            if opcode != "HELLO":
-                raise ProtocolError("Invalid opcode in INIT phase")
-            
-            self.phase = "ACTIVE"
-            response = "HELLO_ACCEPTED"
+        if direction == 0 and opcode not in (self.CLIENT_HELLO, self.CLIENT_DATA, self.TERMINATE):
+            raise ProtocolError("Invalid client-to-server opcode")
 
-        elif self.phase == "ACTIVE":
-            if opcode == "DATA":
-                response = f"DATA_OK:{payload}"
+        if direction == 1 and opcode in (self.CLIENT_HELLO, self.CLIENT_DATA):
+            raise ProtocolError("Client opcode seen in server direction")
 
-            elif opcode == "EXIT":
-                self.phase = "TERMINATED"
-                response = "SESSION_TERMINATED"
 
-            else:
+        if self.phase == self.INIT:
+            if opcode != self.CLIENT_HELLO:
+                raise ProtocolError("INIT phase expects CLIENT_HELLO")
+            self.phase = self.ACTIVE
+
+        elif self.phase == self.ACTIVE:
+            if opcode not in (self.CLIENT_DATA, self.TERMINATE):
                 raise ProtocolError("Invalid opcode in ACTIVE phase")
+            if opcode == self.TERMINATE:
+                self.phase = self.TERMINATED
 
         else:
             raise ProtocolError("Session already terminated")
-        
-        self.expected_round += 1
-        return response
+    
+    def update_keys_after_c2s(self, ciphertext: bytes):
+
+        self.c2s_enc = evolve_key(self.c2s_enc, ciphertext)
+        self.c2s_mac = evolve_key(self.c2s_mac, b"ACHYUTANANDA-SAHOO")
+
+    def update_keys_after_s2c(self, ciphertext: bytes):
+
+        self.s2c_enc = evolve_key(self.s2c_enc, ciphertext)
+        self.s2c_mac = evolve_key(self.s2c_mac, b"SATYAJIT-PRIYADARSHI")
+    
+    def advance_round(self):
+        if self.phase != self.TERMINATED:
+            self.round += 1

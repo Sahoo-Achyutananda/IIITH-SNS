@@ -42,7 +42,7 @@ def encrypt(key: bytes, plaintext:bytes) -> tuple[bytes, bytes]:
     if len(key) != 16:
         raise ValueError("Key must be exactly of 16 bytes")
     
-    iv = os.random(16) #initialization vector
+    iv = os.urandom(16) #initialization vector
     padded_data = add_padding(plaintext)
 
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
@@ -86,6 +86,8 @@ def compute_hmac(key : bytes, data : bytes) -> bytes:
     Inner Pass: The secret key is mixed with some padding (called ipad) and hashed along with the message.
     Outer Pass: That result is then mixed with different padding (opad) and hashed again with the secret key.
     HMAC(k,m)=H((k⊕opad) ∥ H((k⊕ipad) ∥ m))
+
+    The hashing function can be SHA2 or SHA3 etc ..
     """ 
     return hmac.new(key, data, hashlib.sha256).digest()
 
