@@ -1,201 +1,227 @@
-import socket, struct, time, secrets
+import socket
+import struct
+import time
+import secrets
+
 from crypto_utils import Helper, Elgamal, Hash, HMAC, AES
 
-HOST, PORT = "127.0.0.1", 9000
+
+HOST = "127.0.0.1"
+PORT = 9000
 DRONE_ID = b"DRONE-001"
 
-def recv_exact(sock, n):
-    data = b""
-    while len(data) < n:
-        chunk = sock.recv(n - len(data))
-        if not chunk:
-            raise ConnectionError("Socket closed")
-        data += chunk
-    return data
+
+class Connection:
+    def __init__(self, host, port):
+        self.sock = socket.socket()
+        self.sock.connect((host, port))
+
+    def recv_exact(self, n):
+        data = b""
+        while len(data) < n:
+            part = self.sock.recv(n - len(data))
+            if not part:
+                raise ConnectionError
+            data += part
+        return data
+
+    def send(self, data):
+        self.sock.sendall(data)
+
+    def recv_opcode(self):
+        return struct.unpack("!B", self.recv_exact(1))[0]
+
+    def close(self):
+        self.sock.close()
+
+
+class Phase0:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def receive(self):
+        opcode = self.conn.recv_opcode()
+        if opcode != 10:
+            raise Exception("Invalid Phase 0 opcode")
+
+        plen = struct.unpack("!I", self.conn.recv_exact(4))[0]
+        payload = self.conn.recv_exact(plen)
+
+        r = Helper.bytes_to_int(self.conn.recv_exact(256))
+        s = Helper.bytes_to_int(self.conn.recv_exact(256))
+
+        return payload, r, s
+
+    def parse(self, payload):
+        offset = 0
+
+        p_len = struct.unpack("!I", payload[offset:offset+4])[0]
+        offset += 4
+        p = Helper.bytes_to_int(payload[offset:offset+p_len])
+        offset += p_len
+
+        g_len = struct.unpack("!I", payload[offset:offset+4])[0]
+        offset += 4
+        g = Helper.bytes_to_int(payload[offset:offset+g_len])
+        offset += g_len
+
+        sl = struct.unpack("!I", payload[offset:offset+4])[0]
+        offset += 4
+
+        ts = struct.unpack("!Q", payload[offset:offset+8])[0]
+        offset += 8
+
+        mcc_id = payload[offset:offset+9]
+        offset += 9
+
+        pub_len = struct.unpack("!I", payload[offset:offset+4])[0]
+        offset += 4
+        pub = Helper.bytes_to_int(payload[offset:offset+pub_len])
+
+        return p, g, sl, ts, mcc_id, pub
+
+    def verify(self, payload, r, s, p, g, pub, sl):
+        if p.bit_length() < sl:
+            raise Exception("Weak parameters")
+
+        if not Elgamal.verify(payload, r, s, pub, p, g):
+            raise Exception("Bad MCC signature")
+
+
+class Phase1:
+    def __init__(self, conn, p, g, mcc_pub):
+        self.conn = conn
+        self.p = p
+        self.g = g
+        self.mcc_pub = mcc_pub
+        self.priv, self.pub = Elgamal.keygen(p, g)
+        self.K = secrets.randbits(256)
+
+    def send_auth(self):
+        c1, c2 = Elgamal.encrypt(self.K, self.mcc_pub, self.p, self.g)
+
+        self.ts_d = int(time.time())
+        self.rn_d = secrets.randbits(64)
+
+        body = (
+            struct.pack("!Q", self.ts_d) +
+            struct.pack("!Q", self.rn_d) +
+            DRONE_ID.ljust(16, b'\x00') +
+            Helper.int_to_bytes(c1).rjust(256, b'\x00') +
+            Helper.int_to_bytes(c2).rjust(256, b'\x00')
+        )
+
+        r, s = Elgamal.sign(body, self.priv, self.p, self.g)
+
+        msg = (
+            struct.pack("!B", 20) +
+            body +
+            Helper.int_to_bytes(r).rjust(256, b'\x00') +
+            Helper.int_to_bytes(s).rjust(256, b'\x00')
+        )
+
+        self.conn.send(msg)
+
+    def receive_response(self):
+        opcode = self.conn.recv_opcode()
+        if opcode != 30:
+            raise Exception("Auth failed")
+
+        data = self.conn.recv_exact(537)
+        r = Helper.bytes_to_int(self.conn.recv_exact(256))
+        s = Helper.bytes_to_int(self.conn.recv_exact(256))
+
+        if not Elgamal.verify(data, r, s, self.mcc_pub, self.p, self.g):
+            raise Exception("Bad MCC response signature")
+
+        ts_m = struct.unpack("!Q", data[0:8])[0]
+        rn_m = struct.unpack("!Q", data[8:16])[0]
+
+        c1 = Helper.bytes_to_int(data[25:281])
+        c2 = Helper.bytes_to_int(data[281:537])
+
+        K2 = Elgamal.decrypt(c1, c2, self.priv, self.p)
+
+        if K2 != self.K:
+            raise Exception("Key mismatch")
+
+        return ts_m, rn_m
+
+
+class Phase2:
+    def __init__(self, conn, K, ts_d, ts_m, rn_d, rn_m):
+        self.conn = conn
+        self.sk = Hash.hash_bytes(
+            Helper.int_to_bytes(K) +
+            struct.pack("!QQQQ", ts_d, ts_m, rn_d, rn_m)
+        )
+
+    def confirm(self):
+        ts = int(time.time())
+        data = DRONE_ID + struct.pack("!Q", ts)
+        tag = HMAC.hmac_sha256(self.sk, data)
+
+        self.conn.send(struct.pack("!B", 40) + tag)
+
+        if self.conn.recv_opcode() != 50:
+            raise Exception("Confirmation failed")
+
+        return self.sk
+
+
+class Phase3:
+    def __init__(self, conn, sk):
+        self.conn = conn
+        self.sk = sk
+        self.gk = None
+
+    def listen(self):
+        while True:
+            op = self.conn.recv_opcode()
+
+            if op == 70:
+                iv = self.conn.recv_exact(16)
+                ct = self.conn.recv_exact(48)
+                self.gk = AES.aes_decrypt(self.sk, iv, ct)
+
+            elif op == 80:
+                iv = self.conn.recv_exact(16)
+                ct = self.conn.recv_exact(1024)
+                tag = self.conn.recv_exact(32)
+
+                if HMAC.hmac_sha256(self.gk, iv + ct) != tag:
+                    continue
+
+                msg = AES.aes_decrypt(self.gk, iv, ct)
+                print(msg.decode().strip())
+
+            elif op == 90:
+                break
+
 
 def main():
-    sock = socket.socket()
-    sock.connect((HOST, PORT))
-    print(f"[DRONE] Connected to MCC at {HOST}:{PORT}")
-    
-    # Phase 0: Parameter Init
-    print("[DRONE] Phase 0: Receiving parameters...")
-    opcode = struct.unpack("!B", recv_exact(sock, 1))[0]
-    if opcode != 10:
-        raise Exception(f"Expected PARAM_INIT (10), got {opcode}")
-    
-    plen = struct.unpack("!I", recv_exact(sock, 4))[0]
-    payload = recv_exact(sock, plen)
-    r_m = Helper.bytes_to_int(recv_exact(sock, 256))
-    s_m = Helper.bytes_to_int(recv_exact(sock, 256))
+    conn = Connection(HOST, PORT)
 
-    # Parse parameters
-    p_len = struct.unpack("!I", payload[0:4])[0]
-    p = Helper.bytes_to_int(payload[4:4+p_len])
-    
-    # G is variable length - find where it ends
-    g_start = 4 + p_len
-    g_bytes_len = 1  # G=2 is 1 byte
-    g = Helper.bytes_to_int(payload[g_start:g_start+g_bytes_len])
-    
-    sl_start = g_start + g_bytes_len
-    sl = struct.unpack("!I", payload[sl_start:sl_start+4])[0]
-    
-    ts_start = sl_start + 4
-    ts_0 = struct.unpack("!Q", payload[ts_start:ts_start+8])[0]
-    
-    id_start = ts_start + 8
-    mcc_id = payload[id_start:id_start+9]
-    
-    pubkey_len_start = id_start + 9
-    mcc_pub_len = struct.unpack("!I", payload[pubkey_len_start:pubkey_len_start+4])[0]
-    
-    pubkey_start = pubkey_len_start + 4
-    mcc_pub_key = Helper.bytes_to_int(payload[pubkey_start:pubkey_start+mcc_pub_len])
-    
-    print(f"[DRONE] Received: SL={sl}, p={p.bit_length()} bits, g={g}")
-    print(f"[DRONE] MCC_PUB = {str(mcc_pub_key)[:60]}...")
-    print(f"[DRONE] DEBUG: p_len={p_len}, pub_len={mcc_pub_len}, payload_len={len(payload)}")
-    
-    # Verify parameters
-    if p.bit_length() < sl:
-        raise Exception(f"Security violation! p has {p.bit_length()} bits but SL={sl}")
-    
-    # Verify MCC signature using the provided public key
-    if not Elgamal.verify(payload, r_m, s_m, mcc_pub_key, p, g):
-        print(f"[DRONE] DEBUG: Signature verification details:")
-        print(f"  - payload hash: {Hash.hash_int(payload) % 10000}")
-        print(f"  - r: {str(r_m)[:50]}...")
-        print(f"  - s: {str(s_m)[:50]}...")
-        print(f"  - pub_key: {str(mcc_pub_key)[:50]}...")
-        raise Exception("MCC signature verification failed!")
-    
-    print("[DRONE] Phase 0: Parameters verified ✓")
+    p0 = Phase0(conn)
+    payload, r, s = p0.receive()
+    p, g, sl, ts0, mcc_id, mcc_pub = p0.parse(payload)
+    print(p, "\n")
+    print(g, "\n")
+    print(mcc_pub)
+    p0.verify(payload, r, s, p, g, mcc_pub, sl)
 
-    # Phase 1A: Generate keys and send authentication request
-    print("[DRONE] Phase 1A: Generating keys and authenticating...")
-    priv_d, pub_d = Elgamal.keygen(p, g)
-    K = secrets.randbits(256)
-    
-    # Encrypt K with MCC's public key
-    c1, c2 = Elgamal.encrypt(K, mcc_pub_key, p, g)
-    
-    ts_d = int(time.time())
-    rn_d = secrets.randbits(64)
-    
-    # Build authentication message
-    header = struct.pack("!Q", ts_d) + struct.pack("!Q", rn_d) + DRONE_ID.ljust(16, b'\x00')
-    auth_body = header + Helper.int_to_bytes(c1).rjust(256, b'\x00') + Helper.int_to_bytes(c2).rjust(256, b'\x00')
-    
-    # Sign the authentication
-    r_d, s_d = Elgamal.sign(auth_body, priv_d, p, g)
-    
-    auth_msg = (struct.pack("!B", 20) + auth_body + 
-                Helper.int_to_bytes(r_d).rjust(256, b'\x00') + 
-                Helper.int_to_bytes(s_d).rjust(256, b'\x00'))
-    
-    sock.sendall(auth_msg)
-    print(f"[DRONE] Sent AUTH_REQ with K={K}")
+    p1 = Phase1(conn, p, g, mcc_pub)
+    p1.send_auth()
+    ts_m, rn_m = p1.receive_response()
 
-    # Phase 1B: Receive MCC Response
-    print("[DRONE] Phase 1B: Waiting for MCC response...")
-    opcode = struct.unpack("!B", recv_exact(sock, 1))[0]
-    if opcode != 30:
-        raise Exception(f"Expected AUTH_RES (30), got {opcode}")
-    
-    # Read response data: ts(8) + rn(8) + id(9) + c1(256) + c2(256) = 537 bytes
-    res_data = recv_exact(sock, 537)
-    r_m_sig = Helper.bytes_to_int(recv_exact(sock, 256))
-    s_m_sig = Helper.bytes_to_int(recv_exact(sock, 256))
-    
-    ts_m = struct.unpack("!Q", res_data[0:8])[0]
-    rn_m = struct.unpack("!Q", res_data[8:16])[0]
-    mcc_id_resp = res_data[16:25]
-    c1b = Helper.bytes_to_int(res_data[25:281])
-    c2b = Helper.bytes_to_int(res_data[281:537])
-    
-    # Verify MCC signature on response
-    if not Elgamal.verify(res_data, r_m_sig, s_m_sig, mcc_pub_key, p, g):
-        raise Exception("MCC response signature verification failed!")
-    
-    # Decrypt and verify K
-    K_received = Elgamal.decrypt(c1b, c2b, priv_d, p)
-    if K_received != K:
-        raise Exception(f"Key mismatch! Sent {K}, received {K_received}")
-    
-    print(f"[DRONE] Phase 1B: MCC proved knowledge of K ✓")
+    p2 = Phase2(conn, p1.K, p1.ts_d, ts_m, p1.rn_d, rn_m)
+    sk = p2.confirm()
 
-    # Phase 2: Session Key Confirmation
-    print("[DRONE] Phase 2: Deriving session key...")
-    sk = Hash.hash_bytes(Helper.int_to_bytes(K) + 
-                         struct.pack("!QQQQ", ts_d, ts_m, rn_d, rn_m))
-    
-    # Send confirmation with timestamp
-    ts_final = int(time.time())
-    confirm_data = DRONE_ID.strip(b'\x00') + struct.pack("!Q", ts_final)
-    hmac_tag = HMAC.hmac_sha256(sk, confirm_data)
-    
-    confirm_msg = struct.pack("!B", 40) + hmac_tag
-    sock.sendall(confirm_msg)
-    print("[DRONE] Sent SK_CONFIRM")
-    
-    # Wait for confirmation
-    opcode = struct.unpack("!B", recv_exact(sock, 1))[0]
-    if opcode == 50:
-        print("[DRONE] ✓✓✓ FULLY AUTHENTICATED ✓✓✓")
-    elif opcode == 60:
-        raise Exception("MCC rejected: HMAC mismatch")
-    else:
-        raise Exception(f"Unexpected opcode: {opcode}")
+    p3 = Phase3(conn, sk)
+    p3.listen()
 
-    # Phase 3: Listen for group commands
-    print("[DRONE] Phase 3: Listening for commands...")
-    gk = None
-    
-    while True:
-        try:
-            op = struct.unpack("!B", recv_exact(sock, 1))[0]
-            
-            if op == 70:  # GROUP_KEY
-                print("[DRONE] Receiving group key...")
-                iv = recv_exact(sock, 16)
-                ct = recv_exact(sock, 48)  # 32 bytes key + 16 bytes padding
-                gk = AES.aes_decrypt(sk, iv, ct)
-                print(f"[DRONE] Group key received: {gk.hex()[:32]}...")
-                
-            elif op == 80:  # GROUP_CMD
-                if gk is None:
-                    print("[DRONE] Warning: Received GROUP_CMD before GROUP_KEY")
-                    continue
-                    
-                iv = recv_exact(sock, 16)
-                ct = recv_exact(sock, 1024)
-                tag = recv_exact(sock, 32)
-                
-                # Verify HMAC
-                expected_tag = HMAC.hmac_sha256(gk, iv + ct)
-                if expected_tag != tag:
-                    print("[DRONE] ERROR: HMAC verification failed!")
-                    continue
-                
-                # Decrypt command
-                plaintext = AES.aes_decrypt(gk, iv, ct)
-                command = plaintext.decode().strip()
-                print(f"[DRONE] ✓ COMMAND RECEIVED: '{command}'")
-                
-            elif op == 90:  # SHUTDOWN
-                print("[DRONE] Shutdown command received")
-                break
-                
-            else:
-                print(f"[DRONE] Unknown opcode: {op}")
-                
-        except Exception as e:
-            print(f"[DRONE] Error in command loop: {e}")
-            break
-    
-    sock.close()
-    print("[DRONE] Connection closed")
+    conn.close()
+
 
 if __name__ == "__main__":
     main()
