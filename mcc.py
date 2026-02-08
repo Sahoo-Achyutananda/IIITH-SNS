@@ -94,6 +94,20 @@ class Phase1:
         if opcode != 20:
             raise Exception("Invalid AUTH_REQ Opcode")
 
+        # adding some extra code for security check -
+        current_time = int(time.time())
+        
+        # Calculate the difference (allow for small clock drift)
+        time_diff = abs(current_time - ts_d)
+        
+        print(f"  [SECURITY] Timestamp Check: Packet Time={ts_d}, Server Time={current_time}, Diff={time_diff}s")
+
+        # Reject if older than 10 seconds
+        if time_diff > 10:
+            print(f"  [SECURITY ALERT] REPLAY ATTACK DETECTED! Timestamp expired by {time_diff}s")
+            # Send Error Opcode 60 to tell attacker to go away
+            self.conn.send(struct.pack("!B", 60))
+            raise Exception("Replay Attack Blocked: Timestamp expired")
         
         drone_id = d_id.strip(b'\x00')
         drone_pub = Helper.bytes_to_int(drone_pub_bytes)
