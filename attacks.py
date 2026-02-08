@@ -106,39 +106,6 @@ class MitMProxy:
             self.execute_replay()
             self.running = False # Stop after attack
 
-    # def tamper_phase0(self, original_data):
-    #     """
-    #     Replaces the valid large Prime P with a weak prime (23).
-    #     Phase 0 Structure: Op(1) | Plen(4) | P | Glen(4) | G | ...
-    #     """
-    #     try:
-    #         # We must parse enough to preserve the rest of the packet structure
-    #         offset = 1 # Skip Opcode
-            
-    #         # Original P Length
-    #         p_len = struct.unpack("!I", original_data[offset:offset+4])[0]
-            
-    #         # Create Weak P
-    #         weak_p = 23
-    #         weak_p_bytes = Helper.int_to_bytes(weak_p)
-    #         weak_p_len = len(weak_p_bytes)
-            
-    #         # Reconstruct Payload
-    #         # Head: Opcode (1) + New Length (4) + Weak P
-    #         new_head = original_data[0:1] + struct.pack("!I", weak_p_len) + weak_p_bytes
-            
-    #         # Tail: Everything after the original P
-    #         # (Length of Op + Length of Size field + Length of original P)
-    #         tail_start = 1 + 4 + p_len
-    #         tail = original_data[tail_start:]
-            
-    #         print(f"[ATTACKER] Replaced {p_len}-byte Prime with 1-byte Prime (23).")
-    #         return new_head + tail
-            
-    #     except Exception as e:
-    #         print(f"[ERROR] Tampering failed: {e}")
-    #         return original_data
-
     def tamper_phase0(self, original_data):
         """
         Replaces the valid large Prime P with a weak prime (23).
@@ -227,17 +194,22 @@ def unauthorized_attack():
         sock.recv(4096)
         
         print("[ATTACKER] Generating Fake Auth Packet...")
-        # Opcode 20 + Garbage
+        # Opcode 20 + Garbage Data
         fake_id = b"EVIL-DRONE-999".ljust(16, b'\x00')
         payload = struct.pack("!B", 20) + (b'\xFF' * 16) + fake_id + (b'\x00' * 500)
         
         sock.sendall(payload)
         
         response = sock.recv(1024)
-        if not response:
-            print("[RESULT] Connection closed immediately (Good).")
+        
+        # Check for Opcode 60 (which is '<' in ASCII)
+        if response == b'\x3c': 
+            print("[RESULT] SUCCESS! Server rejected the request with Opcode 60 (Auth Failed).")
+        elif not response:
+            print("[RESULT] SUCCESS! Server closed connection immediately.")
         else:
-            print(f"[RESULT] Server responded: {response}")
+            print(f"[RESULT] Server responded with raw data: {response}")
+            
         sock.close()
     except Exception as e:
         print(f"[ERROR] {e}")
