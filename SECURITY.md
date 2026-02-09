@@ -1,185 +1,143 @@
-# UAV Command and Control System
+# SECURITY.md
 
-## Project Overview
+## How the Protocol Ensures Security
 
-Secure UAV (Unmanned Aerial Vehicle) Command and Control system implementing a custom cryptographic protocol with manual ElGamal encryption, digital signatures, and secure group broadcasting.
-
----
-
-## Performance Benchmarks (2048-bit ElGamal Operations)
-
-### Test Configuration
-- **Prime Size:** 2048 bits (RFC 3526 MODP Group)
-- **Iterations:** 50 per operation
-- **Implementation:** Manual ElGamal using Python's built-in arbitrary precision integers
-
-### Benchmark Results
-
-```
-[*] Starting Benchmark for 2048-bit ElGamal Operations
-[*] Prime P size: 2048 bits
-[*] Iterations per test: 50
-=================================================================
-OPERATION                 | AVG TIME (ms)   | NOTES               
------------------------------------------------------------------
-Key Generation            | 81.92 ms       | g^x mod p           
-Encryption                | 101.08 ms      | 2 ModExps           
-Decryption                | 28.97 ms       | 1 ModExp + Inv      
-Digital Signing           | 30.66 ms       | 1 ModExp            
-Signature Verification    | 59.99 ms       | 2 ModExps (Slow)    
-=================================================================
-```
-
-### Performance Analysis
-
-| Operation | Avg Time (ms) | Modular Exponentiations | Description |
-|-----------|---------------|-------------------------|-------------|
-| **Key Generation** | 81.92 | 1 | Compute y = g^x mod p |
-| **Encryption** | 101.08 | 2 | Compute c1 = g^k, c2 = m·y^k |
-| **Decryption** | 28.97 | 1 + Inverse | Compute s = c1^x, m = c2·s^(-1) |
-| **Digital Signing** | 30.66 | 1 | Compute r = g^k mod p |
-| **Signature Verification** | 59.99 | 2 | Compute g^H(m) and y^r·r^s |
-
-**Key Observations:**
-- **Modular Exponentiation** with 2048-bit primes averages **~30-82ms** per operation
-- **Encryption** takes longer (101ms) due to two exponentiations (c1 and c2 computation)
-- **Decryption** is faster (29ms) with only one exponentiation plus modular inverse
-- **Signature Verification** (60ms) requires two exponentiations, making it the slowest per-operation task
-- **Total authentication time** (Phase 0-2) is approximately **300-400ms per drone**
-
-**Implementation Details:**
-- Square-and-multiply algorithm for fast modular exponentiation
-- Iterative Extended Euclidean Algorithm for modular inverse
-- No external libraries (GMP/OpenSSL) used for arithmetic operations
-- Suitable for real-time UAV authentication scenarios
+This document explains how the UAV Command and Control protocol protects against common attacks through **Freshness** and **Forward Secrecy**.
 
 ---
 
-## How to Run
+## 1. Freshness (Replay Attack Protection)
 
-### 1. Setup Environment
+**What is Freshness?**  
+Freshness ensures that old messages cannot be reused by an attacker. Without it, an attacker could capture a valid authentication packet and replay it later to gain unauthorized access.
 
-```bash
-# Activate virtual environment
-source .crypto2/bin/activate
+**How We Implement Freshness:**
 
-# Install dependencies
-pip install pycryptodome
+### Timestamps (Phase 1)
+- Every authentication request includes a timestamp (`TS_d`) from the drone
+- The MCC checks if the timestamp is within 10 seconds of the current time
+- If the packet is older than 10 seconds, it is rejected immediately
+- This prevents attackers from replaying captured packets after they expire
+
+**Code Implementation (mcc.py, Phase 1):**
+```python
+current_time = int(time.time())
+time_diff = abs(current_time - ts_d)
+
+if time_diff > 10:
+    print("[SECURITY ALERT] REPLAY ATTACK DETECTED!")
+    self.conn.send(struct.pack("!B", 60))  # Send error opcode
+    raise Exception("Replay Attack Blocked: Timestamp expired")
 ```
 
-### 2. Run Performance Benchmark
+### Random Nonces (Phase 1)
+- Drone generates a random nonce `RN_d` (64-bit random number)
+- MCC generates its own random nonce `RN_MCC`
+- Both nonces are included in the session key derivation
+- Even if timestamps were identical, different nonces ensure different session keys
 
-```bash
-python3 benchmark.py
+**Session Key Formula:**
+```
+SK = SHA-256(K || TS_d || TS_MCC || RN_d || RN_MCC)
 ```
 
-### 3. Start MCC Server
-
-**Terminal 1:**
-```bash
-python3 mcc.py
-```
-
-### 4. Connect Drones
-
-**Terminal 2:**
-```bash
-python3 drone.py DRONE-001
-```
-
-**Terminal 3:**
-```bash
-python3 drone.py DRONE-002
-```
-
-**Terminal 4:**
-```bash
-python3 drone.py DRONE-003
-```
-
-### 5. MCC Commands
-
-```
-MCC> list                          # Show connected drones
-MCC> broadcast RETURN_TO_BASE      # Send encrypted command to all drones
-MCC> shutdown                      # Close all connections
-```
+### Why This Works:
+1. **Timestamps expire** - Old packets are rejected
+2. **Nonces are unique** - Each session has different random values
+3. **Combined protection** - Even if one mechanism fails, the other provides backup
 
 ---
 
-## Running Security Tests
+## 2. Forward Secrecy
 
-```bash
-python3 attacks.py
+**What is Forward Secrecy?**  
+Forward Secrecy ensures that if a private key is compromised in the future, past communications remain secure. An attacker cannot decrypt old messages even if they steal the server's private key later.
+
+**How We Implement Forward Secrecy:**
+
+### Ephemeral Session Keys (Phase 1-2)
+- Each drone generates a fresh random secret `K` for every connection
+- `K` is a 256-bit random number that changes with each session
+- `K` is encrypted using ElGamal and sent to the MCC
+- After deriving the session key, `K` is discarded
+
+**Code Implementation (drone.py, Phase 1):**
+```python
+self.K = secrets.randbits(256)  # New random key every time
+c1, c2 = Elgamal.encrypt(self.K, self.mcc_pub, self.p, self.g)
 ```
 
-**Available Attacks:**
-1. **MitM Parameter Tampering** - Intercepts and modifies Phase 0 prime
-2. **Replay Attack** - Captures and replays authentication packets
-3. **Unauthorized Access** - Attempts connection with fake credentials
+### Session Key Derivation
+- Both parties derive `SK` from the ephemeral `K` plus timestamps and nonces
+- `SK` is used for all subsequent encryption (Phase 2 HMAC, Phase 3 AES)
+- Once the session ends, `SK` is lost forever
 
-**Expected Results:**
-- Replay attacks are blocked (timestamp validation)
-- Parameter tampering detected (signature verification fails)
-- Unauthorized access rejected (invalid signatures)
+**Key Points:**
+```
+SK_session1 = SHA-256(K1 || TS1 || TS_MCC1 || RN1 || RN_MCC1)
+SK_session2 = SHA-256(K2 || TS2 || TS_MCC2 || RN2 || RN_MCC2)
+```
+These are completely different because K, timestamps, and nonces change.
+
+### Why This Works:
+1. **Ephemeral K** - A new random secret is generated for each session
+2. **No key reuse** - Long-term private keys (MCC's `x`) are never directly used for encryption
+3. **Perfect forward secrecy** - Compromising MCC's private key `x` does NOT reveal past values of `K`
+4. **Session isolation** - Each session has independent cryptographic material
+
+### What an Attacker CANNOT Do:
+- If an attacker steals MCC's private key **today**, they cannot:
+  - Decrypt yesterday's session keys
+  - Decrypt yesterday's messages
+  - Recover the ephemeral `K` values from past sessions
+
+- Why? Because `K` was randomly generated, used once, and destroyed
 
 ---
 
-## Running Unit Tests
+## 3. Combined Security Properties
 
-```bash
-python3 test.py
-```
-
-Tests verify:
-- Key generation correctness (y = g^x mod p)
-- Encryption/Decryption integrity (m' = m)
-- Digital signature validity
-- Signature rejection on tampered data
-
----
-
-## File Structure
-
-```
-├── crypto_utils.py    # Manual ElGamal, modular math, AES/HMAC
-├── mcc.py             # Mission Control Center server
-├── drone.py           # Drone client
-├── attacks.py         # Security attack demonstrations
-├── benchmark.py       # Performance measurement
-├── test.py            # Unit tests
-├── SECURITY.md        # Freshness & Forward Secrecy analysis
-└── README.md          # This file
-```
+| Attack Type | Defense Mechanism | Location |
+|-------------|------------------|----------|
+| Replay Attack | Timestamp validation (10s window) | Phase 1 (mcc.py) |
+| Replay Attack | Random nonces | Phase 1 (both sides) |
+| Session Hijacking | Session key derivation with unique inputs | Phase 2 |
+| Key Compromise | Ephemeral secrets (K) | Phase 1 |
+| Past Traffic Decryption | Forward Secrecy via session-specific keys | Phase 1-2 |
+| Parameter Tampering | Digital signatures on Phase 0 | Phase 0 |
 
 ---
 
-## Security Features
+## 4. Attack Demonstrations (attacks.py)
 
-**Freshness (Replay Protection):**
+### Replay Attack (Attack #2)
+- **What it does:** Captures a valid AUTH_REQ packet and replays it
+- **Expected result:** MCC rejects with Opcode 60 (timestamp expired)
+- **Protection:** Timestamp check in Phase 1
+
+### MITM Parameter Tampering (Attack #1)
+- **What it does:** Replaces the 2048-bit prime with a weak 23-bit prime
+- **Expected result:** Drone detects weak parameters OR signature fails
+- **Protection:** Security level validation + digital signatures
+
+### Unauthorized Access (Attack #3)
+- **What it does:** Sends fake AUTH_REQ with garbage data
+- **Expected result:** MCC rejects due to invalid signature
+- **Protection:** Digital signature verification
+
+---
+
+## Summary
+
+**Freshness is achieved by:**
 - Timestamp validation (10-second window)
 - Random nonces in every session
-- Session key includes timestamps and nonces
+- Combined use in session key derivation
 
-**Forward Secrecy:**
-- Ephemeral session keys (new random K per session)
-- Long-term keys never used directly for encryption
-- Past sessions remain secure if private key compromised
+**Forward Secrecy is achieved by:**
+- Ephemeral random secrets (K) generated per session
+- Session keys derived from ephemeral values
+- No reuse of long-term keys for encryption
+- Immediate destruction of session material after use
 
-See [SECURITY.md](SECURITY.md) for detailed analysis.
-
----
-
-## Requirements
-
-- Python 3.7+
-- pycryptodome (for AES-256-CBC)
-- All ElGamal operations manually implemented
-
----
-
-## Authors
-
-**Course:** System and Network Security (CS8.403)  
-**Institution:** IIIT Hyderabad  
-**Assignment:** Lab 2 - Secure UAV Command and Control System
+This design ensures that even if the MCC's long-term private key is compromised, all past communications remain secure, and old authentication packets cannot be reused.
