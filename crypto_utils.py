@@ -1,12 +1,22 @@
-# crypto_utils.py
-
-
 import secrets
 import hashlib
 import hmac
 from Crypto.Cipher import AES as _AES
 from Crypto.Random import get_random_bytes
 
+class Colors:
+    """
+    ANSI color codes for terminal output formatting.
+    """
+    HEADER = '\033[95m'      # Magenta
+    BLUE = '\033[94m'        # Blue
+    CYAN = '\033[96m'        # Cyan
+    GREEN = '\033[92m'       # Green
+    WARNING = '\033[93m'     # Yellow
+    FAIL = '\033[91m'        # Red
+    ENDC = '\033[0m'         # Reset to default
+    BOLD = '\033[1m'         # Bold
+    UNDERLINE = '\033[4m'    # Underline
 
 class Helper:
     """

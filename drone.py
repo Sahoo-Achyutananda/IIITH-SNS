@@ -4,12 +4,11 @@ import time
 import secrets
 import sys 
 
-from crypto_utils import Helper, Elgamal, Hash, HMAC, AES
+from crypto_utils import Helper, Elgamal, Hash, HMAC, AES, Colors
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 9000
 
-# 1. Parse Drone ID
 if len(sys.argv) > 1:
     DRONE_ID_RAW = sys.argv[1].encode()
 else:
@@ -18,17 +17,16 @@ else:
 # Pad to 16 bytes
 DRONE_ID = DRONE_ID_RAW[:16].ljust(16, b'\x00')
 
-# 2. Parse Port Number (New!)
 if len(sys.argv) > 2:
     try:
         PORT = int(sys.argv[2])
     except ValueError:
-        print(f"[ERROR] Invalid port '{sys.argv[2]}'. Using default {DEFAULT_PORT}.")
+        print(f"{Colors.FAIL}[ERROR] Invalid port '{sys.argv[2]}'. Using default {DEFAULT_PORT}.{Colors.ENDC}")
         PORT = DEFAULT_PORT
 else:
     PORT = DEFAULT_PORT
 
-print(f"[*] Drone ID: {DRONE_ID_RAW.decode()}")
+print(f"{Colors.HEADER}[*] Drone ID: {DRONE_ID_RAW.decode()}{Colors.ENDC}")
 print(f"[*] Target: {HOST}:{PORT}")
 
 class Connection:
@@ -37,9 +35,9 @@ class Connection:
         self.sock = socket.socket()
         try:
             self.sock.connect((host, port))
-            print("[DEBUG] Connection established.")
+            print(f"{Colors.GREEN}[DEBUG] Connection established.{Colors.ENDC}")
         except ConnectionRefusedError:
-            print(f"[FATAL] Could not connect to {host}:{port}. Is the server (or proxy) running?")
+            print(f"{Colors.FAIL}[FATAL] Could not connect to {host}:{port}. Is the server (or proxy) running?{Colors.ENDC}")
             sys.exit(1)
 
     def recv_exact(self, n):
@@ -66,7 +64,7 @@ class Phase0:
         self.conn = conn
 
     def receive(self):
-        print("\n--- PHASE 0 START ---")
+        print(f"\n{Colors.HEADER}--- PHASE 0 START ---{Colors.ENDC}")
         opcode = self.conn.recv_opcode()
         if opcode != 10:
             raise Exception("Invalid Phase 0 opcode")
@@ -110,7 +108,7 @@ class Phase0:
             raise Exception("Weak parameters detected!")
         if not Elgamal.verify(payload, r, s, pub, p, g):
             raise Exception("Bad MCC signature in Phase 0")
-        print("[DEBUG] Phase 0 Signature Verified. MCC is trusted.")
+        print(f"{Colors.GREEN}[DEBUG] Phase 0 Signature Verified. MCC is trusted.{Colors.ENDC}")
 
 class Phase1:
     def __init__(self, conn, p, g, mcc_pub):
@@ -123,7 +121,7 @@ class Phase1:
         print(f"[DEBUG] Generated Ephemeral Key K: {str(self.K)[:10]}...")
 
     def send_auth(self):
-        print("\n--- PHASE 1 START ---")
+        print(f"\n{Colors.HEADER}--- PHASE 1 START ---{Colors.ENDC}")
         # Encrypt K with MCC's Public Key
         c1, c2 = Elgamal.encrypt(self.K, self.mcc_pub, self.p, self.g)
         
@@ -173,7 +171,7 @@ class Phase1:
         if K2 != self.K:
             raise Exception("Key mismatch! MCC did not decrypt correctly.")
         
-        print("[DEBUG] MCC Response Verified (Phase 1B). Keys match.")
+        print(f"{Colors.GREEN}[DEBUG] MCC Response Verified (Phase 1B). Keys match.{Colors.ENDC}")
         return ts_m, rn_m
 
 class Phase2:
@@ -186,7 +184,7 @@ class Phase2:
         print(f"[DEBUG] Session Key Derived: {self.sk.hex()[:10]}...")
 
     def confirm(self):
-        print("\n--- PHASE 2 START ---")
+        print(f"\n{Colors.HEADER}--- PHASE 2 START ---{Colors.ENDC}")
         ts = int(time.time())
         
         clean_id = DRONE_ID.strip(b'\x00') 
@@ -198,9 +196,9 @@ class Phase2:
 
         op = self.conn.recv_opcode()
         if op == 50:
-            print("[DEBUG] MCC Confirmed Session. Secure Channel Open.")
+            print(f"{Colors.GREEN}{Colors.BOLD}[DEBUG] MCC Confirmed Session. Secure Channel Open.{Colors.ENDC}")
         else:
-            print(f"[ERROR] MCC Rejected Confirmation. Opcode: {op}")
+            print(f"{Colors.FAIL}[ERROR] MCC Rejected Confirmation. Opcode: {op}{Colors.ENDC}")
             raise Exception("Confirmation failed")
         return self.sk
 
@@ -211,7 +209,7 @@ class Phase3:
         self.gk = None
 
     def listen(self):
-        print("\n--- PHASE 3 (LISTENING) ---")
+        print(f"\n{Colors.CYAN}--- PHASE 3 (LISTENING) ---{Colors.ENDC}")
         print("Waiting for broadcasts...")
         while True:
             try:
@@ -219,12 +217,11 @@ class Phase3:
                 
                 if op == 70: # Group Key Update
                     iv = self.conn.recv_exact(16)
-                    ct = self.conn.recv_exact(48) # GK (32 bytes) + Padding (16 bytes) = 48 bytes
+                    ct = self.conn.recv_exact(48) 
                     self.gk = AES.aes_decrypt(self.sk, iv, ct)
-                    print(f"\n[BROADCAST] Received new Group Key: {self.gk.hex()[:10]}...")
+                    print(f"\n{Colors.CYAN}[BROADCAST] Received new Group Key: {self.gk.hex()[:10]}...{Colors.ENDC}")
 
                 elif op == 80: # Encrypted Command
-                    # FIX: Read exact length of ciphertext
                     ct_len = struct.unpack("!I", self.conn.recv_exact(4))[0]
                     
                     iv = self.conn.recv_exact(16)
@@ -232,25 +229,24 @@ class Phase3:
                     tag = self.conn.recv_exact(32)
 
                     if not self.gk:
-                        print("[WARN] Received command but no Group Key set.")
+                        print(f"{Colors.WARNING}[WARN] Received command but no Group Key set.{Colors.ENDC}")
                         continue
                         
                     # Verify HMAC
                     if HMAC.hmac_sha256(self.gk, iv + ct) != tag:
-                        print("[WARN] Command Integrity Check Failed!")
+                        print(f"{Colors.FAIL}[WARN] Command Integrity Check Failed!{Colors.ENDC}")
                         continue
 
                     # Decrypt
                     msg = AES.aes_decrypt(self.gk, iv, ct)
                     
-                    # Because aes_decrypt handles unpadding, we just decode
                     try:
-                        print(f"[COMMAND] >>> {msg.decode('utf-8')}")
+                        print(f"{Colors.GREEN}{Colors.BOLD}[COMMAND] >>> {msg.decode('utf-8')}{Colors.ENDC}")
                     except UnicodeDecodeError:
-                        print(f"[ERROR] Decryption produced garbage: {msg}")
+                        print(f"{Colors.FAIL}[ERROR] Decryption produced garbage: {msg}{Colors.ENDC}")
 
                 elif op == 90:
-                    print("Shutdown signal received.")
+                    print(f"{Colors.WARNING}Shutdown signal received.{Colors.ENDC}")
                     break
             except Exception as e:
                 print(f"Connection error: {e}")
@@ -275,7 +271,7 @@ def main():
         p3.listen()
 
     except Exception as e:
-        print(f"[FATAL] Drone Crash: {e}")
+        print(f"{Colors.FAIL}[FATAL] Drone Crash: {e}{Colors.ENDC}")
     finally:
         conn.close()
 
