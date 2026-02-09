@@ -168,17 +168,11 @@ class Phase2:
 
         received_tag = self.conn.recv_exact(32)
         now = int(time.time())
-        
-        # FIX: The drone_id passed here is already stripped in Phase 1
-        # so we just concatenate it with the timestamp.
-        
+                
         verified = False
         for delta in range(-10, 11): # 20 second window
             ts = now + delta
             data = drone_id + struct.pack("!Q", ts)
-            
-            # Debug print to help if it fails again
-            # print(f"DEBUG: Checking TS {ts} | Hash Input: {data[:10]}...") 
 
             if HMAC.hmac_sha256(sk, data) == received_tag:
                 verified = True
@@ -235,7 +229,7 @@ class DroneRegistry:
             for d_id, d in self.drones.items():
                 try:
                     iv, ct = AES.aes_encrypt(d["sk"], gk)
-                    # Send Opcode 70 + IV + Ciphertext (fixed 48 bytes for GK)
+                    # Send Opcode 70 + IV + Ciphertext
                     d["conn"].send(struct.pack("!B", 70) + iv + ct)
                 except Exception as e:
                     print(f"  [BROADCAST ERROR] Could not send GK to {d_id}: {e}")
@@ -256,39 +250,7 @@ class DroneRegistry:
                     d["conn"].send(header + iv + ct + tag)
                 except Exception as e:
                      print(f"  [BROADCAST ERROR] Could not send CMD to {d_id}: {e}")
-    # def broadcast(self, command, mcc_priv):
-    #     with self.lock:
-    #         if not self.drones:
-    #             print("[BROADCAST] No drones connected.")
-    #             return
-
-    #         print(f"[BROADCAST] Generating Group Key for {len(self.drones)} drones...")
-            
-    #         # 1. Generate Group Key (GK)
-    #         material = b"".join(d["sk"] for d in self.drones.values()) + Helper.int_to_bytes(mcc_priv)
-    #         gk = Hash.hash_bytes(material)
-
-    #         # 2. Send GK to all drones
-    #         for d_id, d in self.drones.items():
-    #             try:
-    #                 iv, ct = AES.aes_encrypt(d["sk"], gk)
-    #                 d["conn"].send(struct.pack("!B", 70) + iv + ct)
-    #             except Exception as e:
-    #                 print(f"  [BROADCAST ERROR] Could not send GK to {d_id}: {e}")
-
-    #         time.sleep(0.5) # Allow drones to process GK
-
-    #         # 3. Send Encrypted Command
-    #         print(f"[BROADCAST] Sending encrypted command: '{command}'")
-    #         for d_id, d in self.drones.items():
-    #             try:
-    #                 iv, ct = AES.aes_encrypt(gk, command.encode())
-    #                 ct = ct.ljust(1024, b'\x00') # Pad to fixed size
-    #                 tag = HMAC.hmac_sha256(gk, iv + ct)
-    #                 d["conn"].send(struct.pack("!B", 80) + iv + ct + tag)
-    #             except Exception as e:
-    #                  print(f"  [BROADCAST ERROR] Could not send CMD to {d_id}: {e}")
-
+    
 class DroneHandler(threading.Thread):
     def __init__(self, sock, addr, mcc_priv, mcc_pub, registry):
         super().__init__(daemon=True)

@@ -189,7 +189,6 @@ class Phase2:
         print("\n--- PHASE 2 START ---")
         ts = int(time.time())
         
-        # FIX: Strip the null bytes so it matches what MCC verifies
         clean_id = DRONE_ID.strip(b'\x00') 
         data = clean_id + struct.pack("!Q", ts)
         
@@ -210,43 +209,6 @@ class Phase3:
         self.conn = conn
         self.sk = sk
         self.gk = None
-
-    # def listen(self):
-    #     print("\n--- PHASE 3 (LISTENING) ---")
-    #     print("Waiting for broadcasts...")
-    #     while True:
-    #         try:
-    #             op = self.conn.recv_opcode()
-                
-    #             if op == 70: # Group Key Update
-    #                 iv = self.conn.recv_exact(16)
-    #                 ct = self.conn.recv_exact(48)
-    #                 self.gk = AES.aes_decrypt(self.sk, iv, ct)
-    #                 print(f"\n[BROADCAST] Received new Group Key: {self.gk.hex()[:10]}...")
-
-    #             elif op == 80: # Encrypted Command
-    #                 iv = self.conn.recv_exact(16)
-    #                 ct = self.conn.recv_exact(1024)
-    #                 tag = self.conn.recv_exact(32)
-
-    #                 if not self.gk:
-    #                     print("[WARN] Received command but no Group Key set.")
-    #                     continue
-                        
-    #                 if HMAC.hmac_sha256(self.gk, iv + ct) != tag:
-    #                     print("[WARN] Command Integrity Check Failed!")
-    #                     continue
-
-    #                 msg = AES.aes_decrypt(self.gk, iv, ct)
-    #                 msg_clean = msg.rstrip(b'\x00')
-    #                 print(f"[COMMAND] >>> {msg_clean.decode('utf-8').strip()}")
-
-    #             elif op == 90:
-    #                 print("Shutdown signal received.")
-    #                 break
-    #         except Exception as e:
-    #             print(f"Connection error: {e}")
-    #             break
 
     def listen(self):
         print("\n--- PHASE 3 (LISTENING) ---")
