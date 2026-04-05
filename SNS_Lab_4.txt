@@ -1,0 +1,213 @@
+International Institute of Information Technology
+Hyderabad
+System and Network Security (CS8.403)
+Lab Assignment 4:
+Multi-Source Intrusion Detection System (IDS)
+with Correlation and Robust Alerting
+Hard Deadline: 07-04-2026, 11:59 PM
+Total Marks: 100
+Note:- Use of full IDS frameworks (Snort/Suricata) is not allowed. Languages allowed: C, C++, or
+Python.
+
+1
+
+Objective
+
+In this assignment, you will design and implement a lightweight Intrusion Detection System (IDS)
+that operates by combining information from multiple sources such as host logs and network traffic.
+Unlike traditional IDS solutions that rely on a single source of information, your system must
+correlate evidence across independent channels to improve detection accuracy and robustness. The
+goal is not only to detect attacks but also to minimize false positives and handle noisy or incomplete
+data gracefully.
+Specifically, your system should demonstrate:
+• The ability to correlate multiple weak signals into stronger evidence
+• Robust behavior in the presence of noise and missing inputs
+• A structured alert scoring mechanism to control false positives
+• Reproducible experimental evaluation
+
+2
+
+System Architecture
+
+Your IDS should be organized into modular components, each responsible for a specific task in the
+detection pipeline.
+At a high level, the system consists of the following components:
+1
+
+• Network Sensor: Captures and processes network-level information such as connection attempts, ports accessed, and traffic patterns.
+• Host Sensor: Monitors system-level events such as login attempts, process creation, and user
+activity.
+• Correlation Engine: Combines events from multiple sources and evaluates detection rules.
+• Alert Manager: Generates alerts, assigns severity levels, and prevents duplicate alerts.
+• Attack Simulator: Generates both benign and malicious activity for testing.
+Each component should operate independently but communicate through a common event format.
+Remark
+You are not required to use distributed systems. All components can run as separate processes
+or threads on a single machine.
+
+3
+
+Core Security Requirement
+
+A key requirement of this assignment is to avoid raising high-severity alerts based on weak or isolated
+signals.
+In real-world systems, attackers often evade detection by generating low-intensity or incomplete
+signals. Therefore, your IDS must enforce the following rule:
+A Critical alert should only be raised when:
+• Evidence from at least two independent sources agrees within a given time window, OR
+• A strong multi-step attack pattern is detected through deterministic rules
+This ensures that alerts are meaningful and reduces false positives.
+Important
+If only one sensor generates evidence, the alert severity must not exceed High, even if the signal
+appears suspicious.
+
+4
+
+Implementation Requirements
+
+Your implementation should follow a structured pipeline where raw events are collected, normalized,
+analyzed, and converted into alerts.
+At a minimum, your system must include:
+• A unified JSON-based event schema across all modules
+2
+
+• A sliding time-window mechanism for correlating events
+• At least six non-trivial rule-based detectors
+• One lightweight anomaly detection module based on statistics
+• A severity scoring mechanism (e.g., Info, Low, Medium, High, Critical)
+• Deduplication and cooldown logic to prevent alert flooding
+Important
+A common source of errors is inconsistent event formatting across modules. Define your schema
+once and enforce it strictly.
+
+5
+
+How to Generate Network Traffic and Run Experiments
+
+This assignment is designed to be executed entirely on a single machine. You are not required to use
+real network environments or external datasets.
+
+1. Network Traffic Generation
+To evaluate your IDS, you must generate both benign and malicious network activity.
+This can be achieved using:
+• Python libraries such as scapy
+• Socket-based client-server programs
+• System tools such as curl, netcat, or nmap (for testing only)
+Hint
+Begin with simple connection attempts on localhost (127.0.0.1) before implementing more
+complex attack scenarios.
+
+2. Network Flow Extraction
+Instead of performing deep packet inspection, your system should operate on flow-level metadata.
+For each connection or flow, extract relevant features such as source/destination IPs, ports, protocol
+type, packet counts, and timestamps.
+Remark
+Flow-level analysis is sufficient for this assignment. Avoid unnecessary complexity in packet
+parsing.
+3
+
+3. Host Log Generation
+To simplify experimentation, you should generate synthetic host logs instead of relying on real system
+logs.
+Examples of such events include failed login attempts, successful logins, and suspicious process
+executions.
+These logs should follow the same event schema used by other components.
+
+4. Running Experiments
+Each experiment should follow a structured workflow:
+1. Start all IDS components
+2. Generate benign traffic to establish a baseline
+3. Execute a specific attack scenario
+4. Observe alerts and system behavior
+5. Record metrics and analyze results
+Important
+Avoid mixing multiple attack scenarios in a single experiment unless explicitly required. This
+makes debugging difficult.
+
+6
+
+Threat Model
+
+Your IDS should be capable of detecting a range of realistic attack behaviors.
+The adversary may:
+• Perform brute-force login attempts
+• Conduct port scans (both fast and slow)
+• Replay previously observed benign traffic with slight modifications
+• Inject noise to hide malicious activity
+• Temporarily disable one sensor
+The adversary is assumed to have limited capabilities and cannot completely compromise the
+system.
+
+4
+
+7
+
+Detection Model
+
+Your detection engine should combine both rule-based and statistical approaches.
+A simple scoring model can be used to aggregate evidence:
+score(u, t) =
+
+X
+
+w(e)
+
+Additionally, anomaly detection can be implemented using statistical deviation:
+zf =
+
+ft − µ f
+σf + ϵ
+
+Hint
+Useful features include failed login frequency, number of accessed ports, and request rates per
+IP.
+
+8
+
+Attack Scenarios
+
+You must implement multiple attack scenarios to evaluate your system.
+These include:
+• Brute-force login attempts
+• Port scanning
+• Noise injection
+• Replay attacks
+• Sensor failure simulation
+Each scenario should be reproducible and clearly documented.
+
+9
+
+Metrics
+
+To evaluate your IDS, report the following metrics:
+• Precision, Recall, and F1-score
+• False positive and false negative rates
+• Alert generation latency
+• CPU and memory usage
+These metrics will help demonstrate the effectiveness and efficiency of your system.
+5
+
+10
+
+Submission
+
+Submit a compressed file containing your source code and documentation.
+Your submission should include:
+• All implementation files
+• A README with setup and execution instructions
+• A SECURITY.md file explaining security design
+
+11
+
+Evaluation
+
+Your work will be evaluated based on:
+• Correctness of implementation
+• Quality of detection and correlation logic
+• Depth of security reasoning
+• Code quality and modularity
+• Viva presentation
+
+6
+
+

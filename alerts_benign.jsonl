@@ -1,0 +1,1 @@
+{"timestamp": 1775193956.0679321, "scenario": "benign", "rule": "success_after_failures", "entity": "admin", "severity": "HIGH", "score": 11, "sources": ["host"], "evidence_count": 4, "message": "success_after_failures detected for admin (evidence=4)"}
