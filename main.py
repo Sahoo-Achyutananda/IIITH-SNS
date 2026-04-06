@@ -10,7 +10,7 @@ from alert.alert_manager import AlertManager
 from simulator.attack_simulator import AttackSimulator
 
 WINDOW_SIZE_SECONDS = 10
-TICKS_PER_SCENARIO = 30
+STEPS_PER_SCENARIO = 30
 SCENARIOS = [
     "benign",
     "bruteforce",
@@ -47,6 +47,33 @@ def build_alert(detection, severity, score, scenario):
     }
 
 
+def _safe_div(num, den):
+    return num / den if den else 0.0
+
+
+def print_confusion_matrix(label, counts):
+    tp = counts.get("tp", 0)
+    fp = counts.get("fp", 0)
+    tn = counts.get("tn", 0)
+    fn = counts.get("fn", 0)
+
+    recall = _safe_div(tp, tp + fn)
+    fpr = _safe_div(fp, fp + tn)
+    specificity = _safe_div(tn, tn + fp)
+
+    print(f"\nConfusion Matrix ({label})")
+    print("                 Pred Alert   Pred No Alert")
+    print(f"Actual Malicious    TP={tp:<6} FN={fn}")
+    print(f"Actual Benign       FP={fp:<6} TN={tn}")
+    print(
+        "Recall={:.4f}  FPR={:.4f}  Specificity={:.4f}".format(
+            recall,
+            fpr,
+            specificity,
+        )
+    )
+
+
 def run_scenario(simulator, scenario):
     window = SlidingWindow(WINDOW_SIZE_SECONDS)
     anomaly_detector = StatisticalAnomalyDetector()
@@ -56,14 +83,15 @@ def run_scenario(simulator, scenario):
     print(f"\n=== Scenario: {scenario} ===")
     metrics.start()
 
-    for tick in range(TICKS_PER_SCENARIO):
-        tick_events = simulator.generate_tick(scenario, tick)
-        for event in tick_events:
+    for step in range(STEPS_PER_SCENARIO):
+        step_events = simulator.generate_step(scenario, step)
+        for event in step_events:
             window.add_event(event)
 
         events = window.get_events()
         detections = run_all_rules(events)
         detections.extend(anomaly_detector.update_and_detect(events))
+        detection_present = len(detections) > 0
 
         alert_raised = False
         for detection in detections:
@@ -77,12 +105,17 @@ def run_scenario(simulator, scenario):
                 alert_manager.raise_alert(alert)
                 alert_raised = True
 
-        malicious_present = any(event["label"] == "malicious" for event in events)
-        metrics.record_window(malicious_present, alert_raised, time.time())
+        # Ground truth is evaluated on the current simulation step, not the full
+        # correlation window, to avoid counting stale malicious context repeatedly.
+        malicious_present = any(event["label"] == "malicious" for event in step_events)
+        # Metric positives use detector output, while cooldown remains only for
+        # alert deduplication/logging.
+        metrics.record_window(malicious_present, detection_present, time.time())
         time.sleep(0.05)
 
     scenario_result = metrics.finish()
     print(f"Scenario metrics: {scenario_result}")
+    print_confusion_matrix(f"scenario={scenario}", scenario_result["counts"])
     return scenario_result
 
 
@@ -117,6 +150,15 @@ def aggregate_results(results):
     return avg
 
 
+def aggregate_counts(results):
+    total = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
+    for result in results:
+        counts = result.get("counts", {})
+        for key in total:
+            total[key] += counts.get(key, 0)
+    return total
+
+
 def main():
     args = parse_args()
     selected_scenarios = SCENARIOS if args.scenario == "all" else [args.scenario]
@@ -128,6 +170,7 @@ def main():
 
     print("\n=== Overall Metrics (Average Across Scenarios) ===")
     print(aggregate_results(results))
+    print_confusion_matrix("global", aggregate_counts(results))
 
 
 if __name__ == "__main__":

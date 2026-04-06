@@ -1,3 +1,4 @@
+# inska matlab yeh hai ki - higher the value the more riskier the events are
 EVENT_WEIGHTS = {
     "failed_login": 2,
     "success_login": 1,
